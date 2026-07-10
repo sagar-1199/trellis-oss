@@ -1,15 +1,8 @@
 <div align="center">
 
-# 🌱 Trellis
+<img src="docs/banner.svg" alt="Trellis — one brain over your repos (Obsidian) feeds a safe, human-gated build loop for Claude Code and Codex, ending in a reviewed PR" width="100%"/>
 
-### One brain over all your code projects — plus a safe, human-gated AI build loop.
-
-Give your coding agent a **persistent, self-maintaining memory** of every repo you work on
-(stored as plain Markdown in [Obsidian](https://obsidian.md)) and a disciplined loop that turns
-a one-line task into a **reviewed pull request** — without ever touching your main branch or
-merging on its own.
-
-<br/>
+<br/><br/>
 
 [![Works with Claude Code](https://img.shields.io/badge/Claude%20Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Works with Codex](https://img.shields.io/badge/OpenAI%20Codex-000000?style=for-the-badge&logo=openai&logoColor=white)](https://openai.com/codex)
@@ -19,6 +12,13 @@ merging on its own.
 ![Local-first](https://img.shields.io/badge/Local--first-no%20DB%2C%20no%20cloud-3FA34D?style=flat-square)
 ![Agent-agnostic](https://img.shields.io/badge/Agent-agnostic-1D4ED8?style=flat-square)
 ![Platform](https://img.shields.io/badge/macOS%20%C2%B7%20Linux-informational?style=flat-square)
+
+<br/>
+
+**One brain over all your code projects — plus a safe, human-gated AI build loop.**
+Give your coding agent a persistent, self-maintaining memory of every repo you work on (plain
+Markdown in [Obsidian](https://obsidian.md)) and a loop that turns a one-line task into a
+**reviewed pull request** — without ever touching your main branch or merging on its own.
 
 </div>
 
