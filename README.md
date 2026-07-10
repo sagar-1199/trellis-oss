@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.svg" alt="Trellis — one brain over your repos (Obsidian) feeds a safe, human-gated build loop for Claude Code and Codex, ending in a reviewed PR" width="100%"/>
+<img src="docs/hero.svg" alt="Trellis — one brain over your repos (Obsidian) feeds a safe, human-gated build loop for Claude Code and Codex, ending in a reviewed PR" width="100%"/>
 
 <br/><br/>
 
