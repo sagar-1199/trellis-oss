@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# Trellis launcher — one command, from anywhere.
+#   trellis              open the menu — just type this (pick a number)
+#   trellis ask [proj]   ask questions / get details about a project (read-only, no PR)
+#   trellis run          clarify if needed, THEN build + verify + review — HOLDS for your QA
+#   trellis review       see branches awaiting your QA; approve one -> raises its PR
+#   trellis build        build now, skip the clarify step (use only if already specced)
+#   trellis preview      dry-run: show what it WOULD do, no changes
+#   trellis plan [kw]    just the clarify step: ask questions, write a spec
+#   trellis add          add a task to the backlog (interactive)
+#   trellis status       backlog + recent activity + anything escalated
+#   trellis metrics      accepted-change rate + PR outcomes (the loop's report card)
+#   trellis retro        self-improve: learn from merges/escalations, propose gate tweaks
+#   trellis test [proj]  run a built branch locally so you can click through the change
+#   trellis sync         save ALL projects' Claude chats into the brain (harvest + ingest)
+#   trellis health       vault health check
+#   trellis open         open the vault (Obsidian/Finder)
+#
+# Env passthrough works: e.g.  QA_AGENT=codex trellis run   |   AGENT=codex trellis run
+set -uo pipefail
+: "${AGENT:=claude}"     # engine for ask mode (run/build read it from config.sh)
+TRELLIS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOOP="$TRELLIS_DIR/loop"
+BL="$TRELLIS_DIR/backlog.md"
+
+usage(){ sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+frontmatter(){ awk -v k="$1" '/^---[[:space:]]*$/{n++;next} n==1&&$0~"^"k":"{sub("^"k":[[:space:]]*","");gsub(/^"|"$/,"");print;exit}' "$2"; }
+
+# ask: read-only Q&A about a project (or the whole vault). Interactive unless an inline
+# question is given. Loads the project page + recent conversation history + the repo.
+ask(){
+  local kw="${1:-}"; [ $# -gt 0 ] && shift || true
+  local q="$*" slug page path hist ctx scope instr full arg rundir ctxfile
+  rundir="$TRELLIS_DIR/loop/runs"; mkdir -p "$rundir"
+  if [ -n "$kw" ]; then
+    local matches n; matches="$(cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//' | grep -i "$kw")"
+    n="$(printf '%s\n' "$matches" | grep -c . )"
+    [ "$n" = 0 ] && { echo "No project matches '$kw'. See: trellis status"; return 1; }
+    [ "$n" -gt 1 ] && { echo "Multiple matches for '$kw' — be more specific:"; printf '%s\n' "$matches" | sed 's/^/  /'; return 1; }
+    slug="$matches"; page="$TRELLIS_DIR/projects/$slug.md"; path="$(frontmatter path "$page")"
+    hist="$TRELLIS_DIR/sources/history/$slug.md"
+    ctx="$(cat "$page")"; [ -f "$hist" ] && ctx="$ctx
+
+## Recent conversation history
+$(sed -n '1,120p' "$hist")"
+    scope="the project '$slug' (repo at '$path')"
+    echo "Ask mode | $slug  (read-only)"; cd "$path" 2>/dev/null || cd "$TRELLIS_DIR"
+  else
+    ctx=""; scope="my projects via the Trellis vault at $TRELLIS_DIR (read index.md, projects/*.md, concepts/*.md; read a named project's repo)"
+    echo "Ask mode | whole vault  (read-only)"; cd "$TRELLIS_DIR"
+  fi
+  instr="READ-ONLY Q&A about $scope. Do NOT modify any files. Cite the files/pages you use."
+  if [ -n "$q" ]; then            # one-shot — long context is safe via stdin
+    echo "...reading and answering (headless; output appears below)..."; echo
+    full="$instr"; [ -n "$ctx" ] && full="$instr
+
+CONTEXT:
+$ctx"
+    case "$AGENT" in
+      claude) printf '%s\n\nQUESTION: %s' "$full" "$q" | claude -p --add-dir "$TRELLIS_DIR" --dangerously-skip-permissions ;;
+      codex)  printf '%s\n\nQUESTION: %s' "$full" "$q" | codex exec --sandbox read-only --skip-git-repo-check - ;;
+    esac
+  else                            # interactive — SHORT arg only; big context goes in a file
+    arg="$instr"
+    if [ -n "$ctx" ]; then ctxfile="$rundir/ask-$slug.md"; printf '%s\n' "$ctx" > "$ctxfile"
+      arg="$instr  First read $ctxfile for this project's Trellis page + recent history, then answer my questions."; fi
+    echo "(type your questions; ask follow-ups; exit with Ctrl-D or /exit when done)"; echo
+    case "$AGENT" in
+      claude) claude --add-dir "$TRELLIS_DIR" --dangerously-skip-permissions "$arg" ;;
+      codex)  codex --sandbox read-only "$arg" ;;
+    esac
+  fi
+}
+
+show_status(){
+  echo "Trellis — $TRELLIS_DIR"
+  echo
+  echo "Pending tasks:"
+  local pend; pend="$(awk '
+    /^```/{f=!f; next} f{next}
+    /<!--/{c=1} c{ if(/-->/)c=0; next }
+    /^- \[ \] /{ s=$0; sub(/^- \[ \] /,"",s); gsub(/\([a-z]+:: *[^)]*\)/,"",s); gsub(/^ +| +$/,"",s); print "  - " s }
+  ' "$BL" 2>/dev/null)"
+  [ -n "$pend" ] && echo "$pend" || echo "  (none — add one with: trellis add)"
+  echo
+  local blocked; blocked="$(grep -cE '^- \[!\] ' "$BL" 2>/dev/null)"; blocked="${blocked:-0}"
+  [ "$blocked" -gt 0 ] && echo "Blocked/escalated tasks: $blocked  (see loop/runs/ESCALATED-*.md)"
+  echo "Recent activity:"; grep '^## \[' "$TRELLIS_DIR/log.md" 2>/dev/null | tail -3 | sed 's/^## /  /'
+}
+
+add_task(){
+  echo "Available project slugs:"; ( cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//' | sed 's/^/  /' | paste -sd' ' - | fold -s -w 100 )
+  echo
+  printf "Task title: ";        IFS= read -r title;  [ -z "$title" ] && { echo "aborted (no title)"; return 1; }
+  printf "Repo slug: ";         IFS= read -r repo;   [ -z "$repo" ]  && { echo "aborted (no repo)"; return 1; }
+  [ -f "$TRELLIS_DIR/projects/$repo.md" ] || echo "  (warning: projects/$repo.md doesn't exist — the loop will skip it)"
+  printf "Priority [1]: ";      IFS= read -r pri;    pri="${pri:-1}"
+  printf "Verify cmd (blank = project default): "; IFS= read -r verify
+  printf "Acceptance (what 'done' means): ";        IFS= read -r accept
+  {
+    echo ""
+    echo "- [ ] (priority:: $pri) (repo:: $repo) $title"
+    [ -n "$verify" ] && echo "    - verify:: $verify"
+    echo "    - accept:: ${accept:-TODO: define acceptance criteria}"
+  } >> "$BL"
+  echo "Added. Next:  trellis plan   (clarify)   then   trellis run"
+}
+
+# ---- Ask picker (menu option 3) --------------------------------------------
+ask_menu(){
+  local kw matches n i m pick sel
+  printf "   Type part of a project name (Enter = ask across everything): "
+  read -r kw
+  if [ -z "$kw" ]; then "$0" ask ""; return; fi
+  matches="$(cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//' | grep -i "$kw")"
+  n="$(printf '%s\n' "$matches" | grep -c .)"
+  if [ "$n" = 0 ]; then
+    echo "   No project matches '$kw'. Trellis knows these code projects:"
+    (cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//') | column -c 76 2>/dev/null | sed 's/^/   /' \
+      || (cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//' | sed 's/^/   /')
+    echo "   (try a shorter word like 'api' or 'web')"
+    return
+  fi
+  if [ "$n" = 1 ]; then "$0" ask "$matches"; return; fi
+  echo "   Which one?"; i=0
+  while IFS= read -r m; do i=$((i+1)); printf "     %d) %s\n" "$i" "$m"; done <<<"$matches"
+  printf "   Pick a number: "; read -r pick
+  sel="$(printf '%s\n' "$matches" | sed -n "${pick}p")"
+  if [ -n "$sel" ]; then "$0" ask "$sel"; else echo "   (nothing picked)"; fi
+}
+# ---- review: approve held branches -> raise their PRs ----------------------
+review_pending(){
+  local dir="$LOOP/pending" env i=0 pick act url yn
+  local -a envs=()
+  for env in "$dir"/*.env; do [ -f "$env" ] || continue; i=$((i+1)); envs[$i]="$env"; done
+  if [ "$i" = 0 ]; then echo "Nothing awaiting review. Build one with:  trellis run"; return 0; fi
+  echo "Branches awaiting your QA (built, verified, reviewed — not yet PR'd):"; echo
+  local n=0
+  for env in "${envs[@]}"; do n=$((n+1))
+    ( set -a; . "$env"; set +a
+      printf "  %d) [%s] %s\n     %s -> %s\n" "$n" "$REPO" "$TITLE" "$BRANCH" "$BASE" )
+  done
+  echo
+  printf "Pick a number (Enter to exit): "; read -r pick
+  [ -z "$pick" ] && return 0
+  env="${envs[$pick]:-}"; [ -z "$env" ] && { echo "(nothing picked)"; return 0; }
+  set -a; . "$env"; set +a
+  echo; echo "Selected: [$REPO] $TITLE"
+  echo "  branch: $BRANCH  ->  $BASE"
+  printf "Action — (t)est locally / (a)pprove & raise PR / (d)iscard / Enter=cancel: "; read -r act
+  case "$act" in
+    t|T) "$0" test "$REPO" "$BRANCH" ;;
+    a|A)
+      # eslint/verify already passed in the loop; this just publishes + opens the PR
+      # shellcheck source=/dev/null
+      . "$LOOP/raise_pr.sh"
+      url="$(raise_pr "$RPATH" "$BRANCH" "$BASE" "$TITLE" "$BODY" "$LOOP/runs/review-push.log" | tail -1)"
+      case "$url" in
+        https://*)
+          echo "PR opened: $url"
+          rm -f "$env" "$BODY"
+          PR_URL="$url" MP="$LOOP/metrics.jsonl" REPO="$REPO" python3 - <<'PY'   # stamp URL onto the pending metric
+import json,os
+url,mp,repo=os.environ["PR_URL"],os.environ["MP"],os.environ["REPO"]
+try:
+    lines=[l for l in open(mp).read().strip().split("\n") if l]
+    for i in range(len(lines)-1,-1,-1):
+        r=json.loads(lines[i])
+        if r.get("repo")==repo and r.get("reason")=="pending-review" and not r.get("pr_url"):
+            r["pr_url"]=url; r["reason"]=""; lines[i]=json.dumps(r); break
+    open(mp,"w").write("\n".join(lines)+"\n")
+except Exception: pass
+PY
+          ;;
+        *) printf '%s\n' "$url"; echo "Could not raise the PR — branch '$BRANCH' kept; try again or check gh auth." ;;
+      esac ;;
+    d|D)
+      printf "Delete branch '%s' and discard the build? [y/N] " "$BRANCH"; read -r yn
+      if [ "$yn" = y ] || [ "$yn" = Y ]; then
+        git -C "$RPATH" branch -D "$BRANCH" 2>/dev/null
+        rm -f "$env" "$BODY"; echo "Discarded."
+      else echo "Kept."; fi ;;
+    *) echo "cancelled." ;;
+  esac
+}
+
+ask_test(){
+  echo "   Pick a project to test locally:"
+  local list i=0 line slug
+  list="$(cd "$TRELLIS_DIR/projects" && ls *.md 2>/dev/null | sed 's/\.md$//')"
+  while IFS= read -r slug; do i=$((i+1)); printf "     %2d) %s\n" "$i" "$slug"; done <<EOF
+$list
+EOF
+  printf "   Number: "; read -r pick
+  line="$(printf '%s\n' "$list" | sed -n "${pick}p")"
+  [ -z "$line" ] && { echo "   (nothing picked)"; return; }
+  "$0" test "$line"
+}
+menu(){
+  local choice
+  while true; do
+    clear 2>/dev/null || true
+    printf "\n"
+    printf "   =============================================\n"
+    printf "     T R E L L I S\n"
+    printf "     one brain over your projects + a safe loop\n"
+    printf "   =============================================\n\n"
+    printf "     1)   New task        add something to do\n"
+    printf "     2)   Run             build the next task (holds for your review)\n"
+    printf "     3)   Review          approve a built branch -> raises its PR\n"
+    printf "     4)   Test            run a built branch locally to click through it\n"
+    printf "     5)   Ask             questions about a project (no changes)\n"
+    printf "     6)   Status          what's queued / blocked / recent\n"
+    printf "     7)   Metrics         accepted-change rate (report card)\n"
+    printf "     8)   Sync brain      save all new Claude chats into the vault\n"
+    printf "     9)   Retro           learn + self-improve\n"
+    printf "     0)   Quit    (also: trellis health)\n\n"
+    printf "   ---------------------------------------------\n"
+    printf "   Pick a number: "
+    read -r choice || exit 0
+    case "$choice" in
+      1) "$0" add ;;
+      2) "$0" run ;;
+      3) review_pending ;;
+      4) ask_test ;;
+      5) ask_menu ;;
+      6) "$0" status ;;
+      7) "$0" metrics ;;
+      8) "$0" sync ;;
+      9) "$0" retro ;;
+      0|q|Q|quit|exit) clear 2>/dev/null || true; exit 0 ;;
+      "") continue ;;
+      *) printf "   (pick a number 0-9)\n" ;;
+    esac
+    printf "\n   -- done. Press Enter for the menu -- "; read -r _ || exit 0
+  done
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+  run|go)
+      # Clarify-then-build: if the next task has no spec, run an interactive planning
+      # chat (it asks questions only if needed), then build. Repeat until the backlog
+      # is drained or you abort a planning session.
+      cd "$LOOP"
+      while :; do
+        DRY_RUN=0 REQUIRE_SPEC=1 ./loop.sh; rc=$?
+        [ "$rc" = 10 ] || break
+        echo; echo ">> This task needs clarifying first — starting a quick planning chat."
+        echo "   (answer its questions; it writes a spec, then building continues)"; echo
+        ./plan.sh || { echo "Planning aborted — stopping. Re-run 'trellis run' when ready."; break; }
+      done ;;
+  ask)          ask "$@" ;;
+  build)        echo "Building without the clarify step…"; ( cd "$LOOP" && DRY_RUN=0 ./loop.sh ) ;;
+  preview|dry)  ( cd "$LOOP" && DRY_RUN=1 ./loop.sh ) ;;
+  plan)         ( cd "$LOOP" && ./plan.sh "${1:-}" ) ;;
+  add)          add_task ;;
+  status|st)    show_status ;;
+  metrics)      ( cd "$LOOP" && python3 retro.py --no-report ) ;;
+  retro)        ( cd "$LOOP" && ./retro.sh ) ;;
+  review|reviews) review_pending ;;
+  test|try)     ( cd "$LOOP" && ./test.sh "$@" ) ;;
+  test-clean)   slug="${1:-}"; wt="$TRELLIS_DIR/loop/runs/preview-$slug"
+                p="$TRELLIS_DIR/projects/$slug.md"; rp="$(frontmatter path "$p")"
+                git -C "$rp" worktree remove --force "$wt" 2>/dev/null; git -C "$rp" worktree prune
+                echo "Removed preview checkout for $slug" ;;
+  sync)         echo "Harvesting all Claude conversations into the brain..."
+                ( cd "$TRELLIS_DIR" && python3 loop/harvest.py ) || exit 1
+                echo; ( cd "$LOOP" && ./ingest.sh ) ;;
+  health)       ( cd "$LOOP" && ./health.sh ) ;;
+  open)         open "$TRELLIS_DIR" 2>/dev/null || echo "$TRELLIS_DIR" ;;
+  ""|menu) menu ;;
+  help|-h|--help) show_status; echo; echo "Commands:"; usage ;;
+  *)            echo "Unknown command: $cmd"; echo; echo "Commands:"; usage; exit 64 ;;
+esac

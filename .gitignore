@@ -1,0 +1,17 @@
+# Runtime state — never commit
+loop/runs/
+loop/pending/
+loop/retro/
+loop/metrics.jsonl
+loop/*.log
+
+# Harvested conversation history — LOCAL ONLY (personal/client context)
+sources/history/
+
+# Your live brain lives in the vault you point Trellis at, not here.
+# OS / editor cruft
+.DS_Store
+buddy/__pycache__/
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
